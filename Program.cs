@@ -89,7 +89,8 @@ while (true)
             request += Console.ReadLine();
             break;
         case "":
-            goto finish;
+            request += "|<E>|";
+            break;
         default:
             request += "|<I>|";
             break;
@@ -105,6 +106,9 @@ while (true)
     _ = await client.SendAsync(requestBytes, SocketFlags.None);
     Console.WriteLine($"Socket client sent request: \"{request}\"");
 
+    if (request == "|<E>|")
+        break;
+
     var sizeOfResponseBytes = new byte[4];
     _ = await client.ReceiveAsync(sizeOfResponseBytes, SocketFlags.None);
     int sizeOfResponse = BitConverter.ToInt32(sizeOfResponseBytes);
@@ -119,5 +123,4 @@ while (true)
     Console.Clear();
 }
 
-finish:
-client.Shutdown(SocketShutdown.Both);
+client.Close();
