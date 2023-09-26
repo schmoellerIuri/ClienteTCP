@@ -1,6 +1,10 @@
 ﻿using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using PraticaSocketsCliente;
+
+Console.Clear();
 
 var ipEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 50000);
 
@@ -10,6 +14,65 @@ using Socket client = new(
     ProtocolType.Tcp);
 
 await client.ConnectAsync(ipEndPoint);
+
+byte[]? serverPublicKey = null;
+var cryptoManager = new CryptoManager();
+
+#region Troca de chaves para segredo compartilhado
+try
+{
+    var sizeOfMessageBytes = new byte[4];
+    _ = await client.ReceiveAsync(sizeOfMessageBytes, SocketFlags.None);
+
+    int sizeOfMessage = BitConverter.ToInt32(sizeOfMessageBytes);
+
+    serverPublicKey = new byte[sizeOfMessage];
+    _ = await client.ReceiveAsync(serverPublicKey, SocketFlags.None);
+
+    _ = await client.SendAsync(BitConverter.GetBytes(cryptoManager.PublicKey.Length), SocketFlags.None);
+    _ = await client.SendAsync(cryptoManager.PublicKey, SocketFlags.None);
+}
+catch (SocketException)
+{
+    Console.WriteLine("Não foi possível conectar ao servidor.");
+    return;
+}
+#endregion
+
+#region Realização de autenticação
+string authMessage = string.Empty;
+try
+{
+    authMessage = await ReceiveDecryptedMessage(client, cryptoManager, serverPublicKey);
+
+    var publicParams = cryptoManager.GetRSAParameters();
+
+    SendEncryptedMessage(client, publicParams, cryptoManager, serverPublicKey);
+
+    var signature = cryptoManager.Sign(Encoding.UTF8.GetBytes(authMessage));
+
+    SendEncryptedBytes(client, signature, cryptoManager, serverPublicKey);
+
+    var hashedAuthMessage = SHA256.HashData(Encoding.UTF8.GetBytes(authMessage));
+
+    SendEncryptedBytes(client, hashedAuthMessage, cryptoManager, serverPublicKey);
+
+    string response = await ReceiveDecryptedMessage(client, cryptoManager, serverPublicKey);
+
+    Console.WriteLine($"Response: \"{response}\"");
+
+    if (response.Contains("|<E>|"))
+        throw new SocketException();
+
+}
+catch (SocketException)
+{
+    Console.WriteLine("Não foi possível conectar ao servidor, falha na autenticação.");
+    return;
+}
+
+#endregion
+
 while (true)
 {
     Console.WriteLine("Selecione o tipo de operação que deseja fazer (C,R,U,D) - (Enter para sair):");
@@ -98,24 +161,21 @@ while (true)
 
     Console.Clear();
 
-    var requestBytes = Encoding.UTF8.GetBytes(request);
-
-    var sizeOfRequestInBytes = BitConverter.GetBytes(requestBytes.Length);
-    _ = await client.SendAsync(sizeOfRequestInBytes, SocketFlags.None);
-
-    _ = await client.SendAsync(requestBytes, SocketFlags.None);
-    Console.WriteLine($"Socket client sent request: \"{request}\"");
-
     if (request == "|<E>|")
         break;
 
-    var sizeOfResponseBytes = new byte[4];
-    _ = await client.ReceiveAsync(sizeOfResponseBytes, SocketFlags.None);
-    int sizeOfResponse = BitConverter.ToInt32(sizeOfResponseBytes);
+    #region Envio de IV + Requisição criptografada
 
-    var responseBytes = new byte[sizeOfResponse];
-    _ = await client.ReceiveAsync(responseBytes, SocketFlags.None);
-    string response = Encoding.UTF8.GetString(responseBytes);
+    SendEncryptedMessage(client, request, cryptoManager, serverPublicKey);
+
+    #endregion
+
+    #region Recebimento de IV + Resposta criptografada
+
+    string response = "";
+    response = await ReceiveDecryptedMessage(client, cryptoManager, serverPublicKey);
+    
+    #endregion
 
     Console.WriteLine($"Response: \"{response}\"");
     Console.WriteLine("Pressione qualquer tecla para continuar...");
@@ -124,3 +184,53 @@ while (true)
 }
 
 client.Close();
+
+async void SendEncryptedMessage(Socket client, string message, CryptoManager cryptoManager, byte[] serverPublicKey)
+{
+    var encryptedRequest = cryptoManager.Encrypt(message, serverPublicKey);
+
+    var sizeOfIVBytes = BitConverter.GetBytes(encryptedRequest.IV.Length);
+    _ = await client.SendAsync(sizeOfIVBytes, SocketFlags.None);
+
+    _ = await client.SendAsync(encryptedRequest.IV, SocketFlags.None);
+
+    var sizeOfRequestBytes = BitConverter.GetBytes(encryptedRequest.encryptedMessage.Length);
+    _ = await client.SendAsync(sizeOfRequestBytes, SocketFlags.None);
+
+    _ = await client.SendAsync(encryptedRequest.encryptedMessage, SocketFlags.None);
+}
+
+async void SendEncryptedBytes(Socket client, byte[] message, CryptoManager cryptoManager, byte[] serverPublicKey)
+{
+    var encryptedRequest = cryptoManager.Encrypt(message, serverPublicKey);
+
+    var sizeOfIVBytes = BitConverter.GetBytes(encryptedRequest.IV.Length);
+    _ = await client.SendAsync(sizeOfIVBytes, SocketFlags.None);
+
+    _ = await client.SendAsync(encryptedRequest.IV, SocketFlags.None);
+
+    var sizeOfRequestBytes = BitConverter.GetBytes(encryptedRequest.encryptedMessage.Length);
+    _ = await client.SendAsync(sizeOfRequestBytes, SocketFlags.None);
+
+    _ = await client.SendAsync(encryptedRequest.encryptedMessage, SocketFlags.None);
+}
+
+async Task<string> ReceiveDecryptedMessage(Socket client, CryptoManager cryptoManager, byte[] serverPublicKey)
+{
+    var sizeOfIVResponseBytes = new byte[4];
+    _ = await client.ReceiveAsync(sizeOfIVResponseBytes, SocketFlags.None);
+    int sizeOfIVResponse = BitConverter.ToInt32(sizeOfIVResponseBytes);
+
+    var ivResponse = new byte[sizeOfIVResponse];
+    _ = await client.ReceiveAsync(ivResponse, SocketFlags.None);
+
+    var sizeOfResponseBytes = new byte[4];
+    _ = await client.ReceiveAsync(sizeOfResponseBytes, SocketFlags.None);
+    int sizeOfResponse = BitConverter.ToInt32(sizeOfResponseBytes);
+
+    var responseBytes = new byte[sizeOfResponse];
+    _ = await client.ReceiveAsync(responseBytes, SocketFlags.None);
+    string response = cryptoManager.Decrypt(responseBytes, ivResponse, serverPublicKey);
+
+    return response;
+}
